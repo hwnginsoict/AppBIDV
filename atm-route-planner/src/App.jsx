@@ -5,7 +5,9 @@ import { Download, MapPinned, Route, Upload, Play, Trash2, Network } from "lucid
 import { saveAs } from "file-saver";
 
 // ===== Config =====
-const API_BASE = "http://localhost:8000"; // FastAPI backend (OR-Tools)
+// const API_BASE = "http://localhost:8000"; // FastAPI backend (OR-Tools)
+const API_BASE = "http://127.0.0.1:8000"; // dùng backend local
+const DEMO_MODE = false;
 const DEPOT_ID = 1; // ATM trụ sở chính (bắt buộc start & end)
 const DAILY_LIMIT = 50; // số ATM cần đi trong ngày (không tính DEPOT)
 

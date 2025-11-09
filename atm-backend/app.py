@@ -11,11 +11,24 @@ OSRM_URL = os.getenv("OSRM_URL", "http://localhost:5000")  # ví dụ: http://lo
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # chặt chẽ hơn: ["http://localhost:5173"]
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- HEALTH (đặt sớm để dễ test) ---
+@app.get("/health", include_in_schema=False)
+def health():
+    return {"status": "ok"}
+
+
+# app.py (thêm ngay sau tạo FastAPI app)
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import RedirectResponse
+
+# thư mục build của React sẽ đặt tên "webui"
+
 
 class ATM(BaseModel):
     atm_id: int
@@ -125,3 +138,16 @@ def solve(req: SolveReq):
 
     order_ids = [ids[i] for i in order_idx]
     return SolveResp(order_ids=order_ids, total_distance_m=int(total), legs_m=legs)
+
+
+app.mount("/ui", StaticFiles(directory="webui", html=True), name="ui")
+
+# --- REDIRECT "/" sang UI ---
+@app.get("/", include_in_schema=False)
+def root():
+    return RedirectResponse(url="/ui/")
+
+if __name__ == "__main__":
+    import uvicorn, os
+    port = int(os.getenv("APP_PORT", "8000"))
+    uvicorn.run("app:app", host="127.0.0.1", port=port, log_level="info")
