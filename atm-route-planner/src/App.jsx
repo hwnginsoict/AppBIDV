@@ -1,15 +1,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { MapContainer, TileLayer, Marker, Popup, Polyline } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
-import { Download, MapPinned, Route, Upload, Play, Trash2, Network } from "lucide-react";
+import { Download, MapPinned, Route, Upload, Trash2, Layers3 } from "lucide-react";
 import { saveAs } from "file-saver";
 
 // ===== Config =====
-// const API_BASE = "http://localhost:8000"; // FastAPI backend (OR-Tools)
-const API_BASE = "http://127.0.0.1:8000"; // dùng backend local
-const DEMO_MODE = false;
-const DEPOT_ID = 1; // ATM trụ sở chính (bắt buộc start & end)
-const DAILY_LIMIT = 50; // số ATM cần đi trong ngày (không tính DEPOT)
+const API_BASE = "http://127.0.0.1:8000"; // FastAPI backend
+const DAILY_LIMIT = 100;                  // tối đa số điểm chọn (tổng)
+const DEPOTS = { "Tuyến 1": 1, "Tuyến 2": 2, "Tuyến 3": 3 }; // depot id cho từng tuyến
 
 // ===== Helpers =====
 function haversine(a, b) {
@@ -34,8 +32,8 @@ function parseJSONL(text) {
   return rows;
 }
 
-function toCSV(points, orderIds, allById) {
-  const header = ["order","atm_id","raw_address","final_address","lat","lon","leg_m","cum_m"]; 
+function toCSV(points, orderIds, allById, filename = "route.csv") {
+  const header = ["order","atm_id","raw_address","final_address","lat","lon","leg_m","cum_m"];
   let cum = 0;
   const rows = [];
   for (let i = 0; i < orderIds.length; i++) {
@@ -43,16 +41,18 @@ function toCSV(points, orderIds, allById) {
     let leg = 0;
     if (i > 0) {
       const b = allById.get(orderIds[i-1]) || points.find(p=>p.atm_id===orderIds[i-1]);
-      leg = Math.round(haversine(a, b));
+      if (a && b) leg = Math.round(haversine(a, b));
     }
     cum += leg;
     rows.push([i + 1, a?.atm_id ?? "", a?.raw_address ?? "", a?.final_address ?? "", a?.lat, a?.lon, leg, cum]);
   }
   const csv = [header.join(",")].concat(rows.map(r => r.map(x => typeof x === "string" ? `"${x.replaceAll('"','""')}"` : x).join(","))).join("\n");
-  return new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  saveAs(blob, filename);
 }
 
-// ===== Demo data (có thể dán/nhập file) =====
+// ===== Demo data =====
+// 👉 Thay block dưới bằng TOÀN BỘ JSONL của bạn (có depot #1/#2/#3 and field "route")
 const demoJSONL = `{"lat": 20.9971172, "lon": 105.8422354, "final_address": "1E TRUONG CHINH, Hà Nội, Việt Nam", "display": "Bệnh viện An Việt, 1E, Đường Trường Chinh, Phường Tương Mai, Thành phố Hà Nội, 10999, Việt Nam", "raw_address": "1E TRUONG CHINH", "route": "Tuyến 1", "atm_id": 99098014}
 {"lat": 21.0022278, "lon": 105.8313173, "final_address": "1 TON THAT TUNG, Hà Nội, Việt Nam", "display": "Trường Đại học Y Hà Nội, 1, Phố Tôn Thất Tùng, Khu tập thể Khương Thượng, Phường Kim Liên, Thành phố Hà Nội, 11415, Việt Nam", "raw_address": "1 TON THAT TUNG", "route": "Tuyến 1", "atm_id": 99098015}
 {"lat": 21.002167, "lon": 105.8154867, "final_address": "ROYAL CITY, Hà Nội, Việt Nam", "display": "Vinhomes Royal City, Phường Thanh Xuân, Thành phố Hà Nội, Việt Nam", "raw_address": "R5L1 ROYAL CITY", "route": "Tuyến 1", "atm_id": 99098021}
@@ -165,35 +165,35 @@ const demoJSONL = `{"lat": 20.9971172, "lon": 105.8422354, "final_address": "1E 
 {"lat": 21.0294534, "lon": 105.857076, "final_address": "bidv tower, 194 tran quang khai, ha noi", "display": "BIDV Tower, 194, Đường Trần Quang Khải, Phường Hoàn Kiếm, Thành phố Hà Nội, 10262, Việt Nam", "raw_address": "bidv tower, 194 tran quang khai, ha noi", "route": "Tuyến 1", "atm_id": 1}
 {"lat": 21.0294534, "lon": 105.857076, "final_address": "bidv tower, 194 tran quang khai, ha noi", "display": "BIDV Tower, 194, Đường Trần Quang Khải, Phường Hoàn Kiếm, Thành phố Hà Nội, 10262, Việt Nam", "raw_address": "bidv tower, 194 tran quang khai, ha noi", "route": "Tuyến 2", "atm_id": 2}
 {"lat": 21.0294534, "lon": 105.857076, "final_address": "bidv tower, 194 tran quang khai, ha noi", "display": "BIDV Tower, 194, Đường Trần Quang Khải, Phường Hoàn Kiếm, Thành phố Hà Nội, 10262, Việt Nam", "raw_address": "bidv tower, 194 tran quang khai, ha noi", "route": "Tuyến 3", "atm_id": 3}
-`;
+`; // giữ placeholder rỗng; dán JSONL thật của bạn vào đây
 
 export default function App() {
   const [jsonl, setJsonl] = useState(demoJSONL);
   const [items, setItems] = useState(() => parseJSONL(demoJSONL));
   const [query, setQuery] = useState("");
-  const [selectedIds, setSelectedIds] = useState([]); // chỉ chứa ATM cần đi trong ngày (KHÔNG tính depot)
-  const [routeIds, setRouteIds] = useState([]); // kết quả từ API: list atm_id theo thứ tự (có depot ở đầu & cuối)
-  const [loading, setLoading] = useState(false);
+
+  const [selectedIds, setSelectedIds] = useState([]);        // tất cả điểm đã chọn (không cần chọn depot)
   const [error, setError] = useState("");
+
+  // Kết quả 3 tuyến: { results: { Tuyen1:{order_ids,total_distance_m}, ... } }
+  const [multiLoading, setMultiLoading] = useState(false);
+  const [multiResult, setMultiResult] = useState(null);
 
   // Map by id để tra cứu nhanh
   const byId = useMemo(() => new Map(items.map((x) => [x.atm_id, x])), [items]);
 
-  // Đảm bảo có depot trong dữ liệu
-  const depot = byId.get(DEPOT_ID);
+  // Depot đối với từng tuyến (nếu có trong dữ liệu)
+  const depot1 = byId.get(DEPOTS["Tuyến 1"]);
+  const depot2 = byId.get(DEPOTS["Tuyến 2"]);
+  const depot3 = byId.get(DEPOTS["Tuyến 3"]);
 
-  useEffect(() => {
-    setItems(parseJSONL(jsonl));
-  }, [jsonl]);
+  useEffect(() => { setItems(parseJSONL(jsonl)); }, [jsonl]);
+  useEffect(() => { setMultiResult(null); setError(""); }, [selectedIds.join(","), items.length]);
 
-  useEffect(() => {
-    setRouteIds([]);
-    setError("");
-  }, [selectedIds.join(","), items.length]);
-
+  // Bộ lọc danh sách để chọn điểm
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const arr = items.filter(x => x.atm_id !== DEPOT_ID); // ẩn depot khỏi danh sách chọn
+    const arr = items; // hiển thị mọi điểm (kể cả depot), sẽ chặn chọn depot khi bấm Thêm
     if (!q) return arr;
     return arr.filter(x =>
       String(x.atm_id).includes(q) ||
@@ -206,17 +206,21 @@ export default function App() {
   const selectedPoints = selectedIds.map(id => byId.get(id)).filter(Boolean);
 
   const center = useMemo(() => {
-    const all = [depot, ...selectedPoints].filter(Boolean);
+    const all = [...selectedPoints, depot1, depot2, depot3].filter(Boolean);
     if (!all.length) return [21.0278, 105.8342];
     const lat = all.reduce((s, p) => s + p.lat, 0) / all.length;
     const lon = all.reduce((s, p) => s + p.lon, 0) / all.length;
     return [lat, lon];
-  }, [depot, selectedPoints]);
+  }, [selectedPoints, depot1, depot2, depot3]);
 
   function addId(id) {
+    if (Object.values(DEPOTS).includes(id)) {
+      setError("Không cần chọn depot; hệ thống sẽ tự thêm depot theo tuyến.");
+      return;
+    }
     if (selectedIds.includes(id)) return;
     if (selectedIds.length >= DAILY_LIMIT) {
-      setError(`Đã đủ ${DAILY_LIMIT} ATM cho hôm nay (không tính trụ sở).`);
+      setError(`Đã đủ ${DAILY_LIMIT} điểm đã chọn.`);
       return;
     }
     setSelectedIds(prev => [...prev, id]);
@@ -226,51 +230,92 @@ export default function App() {
     setSelectedIds(prev => prev.filter(x => x !== id));
   }
 
-  async function solveWithOrtools() {
+  // ===== Chia selected theo 3 tuyến & gọi /solve_csv_selected (dùng CSV, không OSRM) =====
+  async function solveSelectedIntoThree() {
     setError("");
-    if (!depot) { setError(`Không tìm thấy depot (atm_id=${DEPOT_ID}) trong dữ liệu.`); return; }
-    if (selectedIds.length === 0) { setError("Chưa chọn ATM nào."); return; }
+    setMultiResult(null);
 
+    // gom theo thuộc tính route
+    const groups = { "Tuyến 1": [], "Tuyến 2": [], "Tuyến 3": [] };
+    for (const id of selectedIds) {
+      const it = byId.get(id);
+      if (it?.route && groups[it.route]) groups[it.route].push(id);
+    }
+    const total = groups["Tuyến 1"].length + groups["Tuyến 2"].length + groups["Tuyến 3"].length;
+    if (total === 0) { setError("Chưa chọn điểm hợp lệ (cần có field 'route' là Tuyến 1/2/3)."); return; }
+
+    // kiểm tra depot tồn tại trong dữ liệu để hiển thị bản đồ
+    const needDepots = [
+      groups["Tuyến 1"].length ? DEPOTS["Tuyến 1"] : null,
+      groups["Tuyến 2"].length ? DEPOTS["Tuyến 2"] : null,
+      groups["Tuyến 3"].length ? DEPOTS["Tuyến 3"] : null,
+    ].filter(Boolean);
+    for (const d of needDepots) {
+      if (!byId.get(d)) { setError(`Thiếu depot atm_id=${d} trong dữ liệu để hiển thị bản đồ.`); return; }
+    }
+
+    // build payload cho backend
     const payload = {
-      depot_id: DEPOT_ID,
-      atms: [depot, ...selectedPoints] // server sẽ đảm bảo start/end ở depot
-        .map(x => ({ atm_id: x.atm_id, lat: x.lat, lon: x.lon, final_address: x.final_address, raw_address: x.raw_address }))
+      routes: {
+        Tuyen1: groups["Tuyến 1"],
+        Tuyen2: groups["Tuyến 2"],
+        Tuyen3: groups["Tuyến 3"],
+      }
+      // Nếu bạn muốn override tên file CSV hay depot id:
+      // depots: { Tuyen1: 1, Tuyen2: 2, Tuyen3: 3 },
+      // files: {
+      //   Tuyen1: "Distance_Matrix_Tuyến1.csv",
+      //   Tuyen2: "Distance_Matrix_Tuyến2.csv",
+      //   Tuyen3: "Distance_Matrix_Tuyến3.csv"
+      // }
     };
 
     try {
-      setLoading(true);
-      const res = await fetch(`${API_BASE}/solve`, {
+      setMultiLoading(true);
+      const res = await fetch(`${API_BASE}/solve_csv_selected`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
       if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setRouteIds(data.order_ids); // [depot, ..., depot]
+      const data = await res.json(); // { results: {Tuyen1:{order_ids,total_distance_m},...}}
+      setMultiResult(data);
     } catch (e) {
-      setError(`Lỗi gọi OR-Tools API: ${e.message}`);
+      setError(`Lỗi khi tối ưu 3 tuyến (CSV): ${e.message}`);
     } finally {
-      setLoading(false);
+      setMultiLoading(false);
     }
   }
 
-  function exportCSV() {
-    if (!routeIds.length) return;
-    const blob = toCSV(items, routeIds, byId);
-    saveAs(blob, "route_ortools.csv");
-  }
+  // Polyline cho 3 tuyến đã tối ưu
+  const lineT1 = useMemo(() => {
+    const ids = multiResult?.results?.Tuyen1?.order_ids || [];
+    return ids.map(Number).map(id => byId.get(id)).filter(Boolean).map(p => [p.lat, p.lon]);
+  }, [multiResult, byId]);
+  const lineT2 = useMemo(() => {
+    const ids = multiResult?.results?.Tuyen2?.order_ids || [];
+    return ids.map(Number).map(id => byId.get(id)).filter(Boolean).map(p => [p.lat, p.lon]);
+  }, [multiResult, byId]);
+  const lineT3 = useMemo(() => {
+    const ids = multiResult?.results?.Tuyen3?.order_ids || [];
+    return ids.map(Number).map(id => byId.get(id)).filter(Boolean).map(p => [p.lat, p.lon]);
+  }, [multiResult, byId]);
 
-  const routeCoords = useMemo(() => {
-    return routeIds.map(id => byId.get(id)).filter(Boolean).map(p => [p.lat, p.lon]);
-  }, [routeIds, byId]);
+  function exportCSVMulti(name) {
+    if (!multiResult?.results?.[name]?.order_ids) return;
+    const ids = multiResult.results[name].order_ids.map(Number);
+    toCSV(items, ids, byId, `route_${name}.csv`);
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 text-gray-900">
       <header className="sticky top-0 z-20 bg-white/80 backdrop-blur border-b">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
           <MapPinned className="w-6 h-6" />
-          <h1 className="text-xl font-semibold">ATM Route Planner</h1>
-          <span className="ml-auto text-sm text-gray-500">Chọn tối đa {DAILY_LIMIT} ATM (không tính depot #{DEPOT_ID})</span>
+          <h1 className="text-xl font-semibold">ATM Route Planner — 3 tuyến cho các điểm đã chọn (CSV)</h1>
+          <span className="ml-auto text-sm text-gray-500">
+            Chọn tối đa {DAILY_LIMIT} điểm; app tự nhóm theo <b>route</b> (Tuyến 1/2/3) và thêm depot tương ứng.
+          </span>
         </div>
       </header>
 
@@ -282,25 +327,55 @@ export default function App() {
               <Upload className="w-4 h-4" />
               <h2 className="font-medium">Nguồn dữ liệu ATM</h2>
             </div>
-            <input type="file" accept=".json,.jsonl,.txt" onChange={(e)=>{ const f=e.target.files?.[0]; if(!f)return; const r=new FileReader(); r.onload=()=>setJsonl(String(r.result||"")); r.readAsText(f); }} className="block w-full text-sm" />
-            <textarea className="w-full h-40 p-3 border rounded-xl focus:outline-none focus:ring" value={jsonl} onChange={(e)=>setJsonl(e.target.value)} />
-            <p className="text-xs text-gray-500">Mỗi dòng là một JSON: {`{ lat, lon, atm_id, raw_address, final_address, route }`}. Nhớ có bản ghi depot với <b>atm_id = {DEPOT_ID}</b>.</p>
+            <input
+              type="file"
+              accept=".json,.jsonl,.txt"
+              onChange={(e)=>{
+                const f=e.target.files?.[0];
+                if(!f) return;
+                const r=new FileReader();
+                r.onload=()=>setJsonl(String(r.result||""));
+                r.readAsText(f);
+              }}
+              className="block w-full text-sm"
+            />
+            <textarea
+              className="w-full h-40 p-3 border rounded-xl focus:outline-none focus:ring"
+              value={jsonl}
+              onChange={(e)=>setJsonl(e.target.value)}
+            />
+            <p className="text-xs text-gray-500">
+              Mỗi dòng là một JSON: {'{ lat, lon, atm_id, raw_address, final_address, route }'}.<br/>
+              Phải có bản ghi depot: <b>atm_id 1</b> (Tuyến 1), <b>2</b> (Tuyến 2), <b>3</b> (Tuyến 3).
+            </p>
           </div>
 
           <div className="bg-white rounded-2xl shadow p-4 space-y-3">
             <div className="flex items-center gap-2">
               <Route className="w-4 h-4" />
-              <h2 className="font-medium">Chọn ATM trong ngày (tối đa {DAILY_LIMIT})</h2>
+              <h2 className="font-medium">Chọn điểm (sẽ chia theo Tuyến 1/2/3)</h2>
             </div>
-            <input className="w-full p-2 border rounded-xl" placeholder="Tìm theo ID / địa chỉ / tuyến..." value={query} onChange={(e)=>setQuery(e.target.value)} />
+            <input
+              className="w-full p-2 border rounded-xl"
+              placeholder="Tìm theo ID / địa chỉ / tuyến..."
+              value={query}
+              onChange={(e)=>setQuery(e.target.value)}
+            />
             <div className="max-h-56 overflow-auto border rounded-xl divide-y">
               {filtered.map((it) => (
                 <div key={it.atm_id} className="flex items-center justify-between p-2 gap-3">
                   <div className="text-sm leading-tight">
                     <div className="font-medium">#{it.atm_id} — {it.raw_address || it.final_address}</div>
                     <div className="text-gray-500">{it.final_address}</div>
+                    <div className="text-[11px] text-indigo-600">{it.route || "Chưa có tuyến"}</div>
                   </div>
-                  <button disabled={selectedIds.includes(it.atm_id) || selectedIds.length>=DAILY_LIMIT} className="px-3 py-1 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-50" onClick={()=>addId(it.atm_id)}>Thêm</button>
+                  <button
+                    disabled={selectedIds.includes(it.atm_id) || selectedIds.length>=DAILY_LIMIT || Object.values(DEPOTS).includes(it.atm_id)}
+                    className="px-3 py-1 rounded-full bg-gray-100 hover:bg-gray-200 disabled:opacity-50"
+                    onClick={()=>setSelectedIds(prev=>[...prev, it.atm_id])}
+                  >
+                    Thêm
+                  </button>
                 </div>
               ))}
             </div>
@@ -309,18 +384,26 @@ export default function App() {
             <div className="max-h-40 overflow-auto border rounded-xl divide-y">
               {selectedPoints.map((it)=> (
                 <div key={it.atm_id} className="flex items-center justify-between p-2">
-                  <div>#{it.atm_id} — {it.raw_address || it.final_address}</div>
+                  <div>#{it.atm_id} — {it.raw_address || it.final_address} <span className="text-xs text-indigo-600">({it.route||"?"})</span></div>
                   <button className="px-2 py-1 rounded bg-gray-100 hover:bg-gray-200" onClick={()=>removeId(it.atm_id)}>Gỡ</button>
                 </div>
               ))}
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <button className="px-4 py-2 rounded-xl bg-black text-white flex items-center gap-2 hover:opacity-90" onClick={solveWithOrtools} disabled={loading}>
-                <Network className="w-4 h-4"/> {loading?"Đang tính...":"Tính bằng OR-Tools (API)"}
+              <button
+                className="px-4 py-2 rounded-xl bg-black text-white flex items-center gap-2 hover:opacity-90"
+                onClick={solveSelectedIntoThree}
+                disabled={multiLoading}
+              >
+                <Layers3 className="w-4 h-4"/>{multiLoading ? "Đang tính 3 tuyến (CSV)..." : "Tính 3 tuyến cho điểm đã chọn (CSV)"}
               </button>
-              <button className="px-4 py-2 rounded-xl bg-gray-100 flex items-center gap-2 hover:bg-gray-200" onClick={()=>{setSelectedIds([]); setRouteIds([]);}}> <Trash2 className="w-4 h-4"/> Xoá chọn </button>
-              <button className="px-4 py-2 rounded-xl bg-gray-100 flex items-center gap-2 hover:bg-gray-200" onClick={exportCSV} disabled={!routeIds.length}> <Download className="w-4 h-4"/> CSV </button>
+              <button
+                className="px-4 py-2 rounded-xl bg-gray-100 flex items-center gap-2 hover:bg-gray-200"
+                onClick={()=>{setSelectedIds([]); setMultiResult(null); setError("");}}
+              >
+                <Trash2 className="w-4 h-4"/> Xoá chọn & kết quả
+              </button>
             </div>
             {error && <div className="text-sm text-red-600">{error}</div>}
           </div>
@@ -329,63 +412,97 @@ export default function App() {
         {/* Map + results */}
         <section className="md:col-span-3 space-y-4">
           <div className="bg-white rounded-2xl shadow overflow-hidden">
-            <MapContainer center={center} zoom={12} style={{ height: 480 }}>
+            <MapContainer center={center} zoom={12} style={{ height: 520 }}>
               <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" attribution="&copy; OpenStreetMap" />
-              {depot && (
-                <Marker position={[depot.lat, depot.lon]}>
-                  <Popup>
-                    <div className="text-sm">
-                      <div className="font-semibold">Depot #{DEPOT_ID}</div>
-                      <div>{depot.final_address || depot.raw_address}</div>
-                    </div>
-                  </Popup>
+
+              {/* Depots */}
+              {depot1 && (
+                <Marker position={[depot1.lat, depot1.lon]}>
+                  <Popup><div className="text-sm"><div className="font-semibold">Depot #1 (Tuyến 1)</div><div>{depot1.final_address || depot1.raw_address}</div></div></Popup>
                 </Marker>
               )}
+              {depot2 && (
+                <Marker position={[depot2.lat, depot2.lon]}>
+                  <Popup><div className="text-sm"><div className="font-semibold">Depot #2 (Tuyến 2)</div><div>{depot2.final_address || depot2.raw_address}</div></div></Popup>
+                </Marker>
+              )}
+              {depot3 && (
+                <Marker position={[depot3.lat, depot3.lon]}>
+                  <Popup><div className="text-sm"><div className="font-semibold">Depot #3 (Tuyến 3)</div><div>{depot3.final_address || depot3.raw_address}</div></div></Popup>
+                </Marker>
+              )}
+
+              {/* Marker các điểm đã chọn */}
               {selectedPoints.map((p) => (
                 <Marker key={p.atm_id} position={[p.lat, p.lon]}>
                   <Popup>
                     <div className="text-sm">
                       <div className="font-medium">#{p.atm_id} — {p.raw_address || p.final_address}</div>
                       <div className="text-gray-600">{p.final_address}</div>
+                      <div className="text-[11px] text-indigo-600">{p.route}</div>
                     </div>
                   </Popup>
                 </Marker>
               ))}
-              {routeCoords.length > 1 && (
-                <Polyline positions={routeCoords} />
-              )}
+
+              {/* Polylines 3 tuyến */}
+              {lineT1.length > 1 && <Polyline positions={lineT1} pathOptions={{ color: "red" }} />}
+              {lineT2.length > 1 && <Polyline positions={lineT2} pathOptions={{ color: "blue" }} />}
+              {lineT3.length > 1 && <Polyline positions={lineT3} pathOptions={{ color: "green" }} />}
             </MapContainer>
           </div>
 
+          {/* Kết quả 3 tuyến */}
           <div className="bg-white rounded-2xl shadow p-4">
-            <h2 className="font-medium mb-3">Kết quả (OR-Tools)</h2>
-            {!routeIds.length ? (
-              <p className="text-sm text-gray-500">Chưa có lộ trình — bấm "Tính bằng OR-Tools (API)".</p>
+            <h2 className="font-medium mb-3">Kết quả 3 tuyến (tối ưu từ các điểm đã chọn, dùng CSV)</h2>
+            {!multiResult ? (
+              <p className="text-sm text-gray-500">Chưa có — bấm "Tính 3 tuyến cho điểm đã chọn (CSV)".</p>
             ) : (
-              <div className="overflow-auto">
-                <table className="min-w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-gray-500">
-                      <th className="px-2 py-1">#</th>
-                      <th className="px-2 py-1">ATM</th>
-                      <th className="px-2 py-1">Địa chỉ</th>
-                      <th className="px-2 py-1">Ghi chú</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {routeIds.map((id, idx) => {
-                      const it = byId.get(id);
-                      return (
-                        <tr key={idx} className="border-t">
-                          <td className="px-2 py-1 font-medium">{idx + 1}</td>
-                          <td className="px-2 py-1">#{id}</td>
-                          <td className="px-2 py-1">{it?.final_address || it?.raw_address}</td>
-                          <td className="px-2 py-1">{id===DEPOT_ID? (idx===0?"Start (Depot)":"End (Depot)") : ""}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              <div className="space-y-6">
+                {["Tuyen1", "Tuyen2", "Tuyen3"].map((name) => {
+                  const r = multiResult.results?.[name];
+                  const order = (r?.order_ids || []).map(Number);
+                  const totalKm = ((r?.total_distance_m ?? 0) / 1000).toFixed(2);
+                  return (
+                    <div key={name} className="border rounded-xl">
+                      <div className="flex items-center justify-between px-3 py-2 bg-gray-50 rounded-t-xl">
+                        <div className="font-medium">✅ {name} — {order.length} điểm</div>
+                        <div className="text-sm text-gray-600">Tổng quãng đường: {totalKm} km</div>
+                      </div>
+                      <div className="overflow-auto">
+                        <table className="min-w-full text-sm">
+                          <thead>
+                            <tr className="text-left text-gray-500">
+                              <th className="px-2 py-1">#</th>
+                              <th className="px-2 py-1">ATM</th>
+                              <th className="px-2 py-1">Địa chỉ</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {order.map((id, i2) => {
+                              const it = byId.get(id);
+                              return (
+                                <tr key={`${name}-${i2}`} className="border-t">
+                                  <td className="px-2 py-1 font-medium">{i2 + 1}</td>
+                                  <td className="px-2 py-1">#{id}</td>
+                                  <td className="px-2 py-1">{it?.final_address || it?.raw_address || "-"}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div className="px-3 py-2 flex gap-2">
+                        <button
+                          className="px-3 py-1 rounded bg-gray-100 hover:bg-gray-200 flex items-center gap-2"
+                          onClick={()=>exportCSVMulti(name)}
+                        >
+                          <Download className="w-4 h-4"/> CSV {name}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -393,8 +510,9 @@ export default function App() {
           <div className="bg-white rounded-2xl shadow p-4 text-sm text-gray-600">
             <h3 className="font-medium mb-2">Ghi chú</h3>
             <ul className="list-disc pl-5 space-y-1">
-              <li>Danh sách chọn trong ngày <b>không tính depot</b>. Hệ thống tự động thêm depot #{DEPOT_ID} ở đầu và cuối route.</li>
-              <li>Backend FastAPI dùng OR-Tools để tối ưu chính xác; Frontend gọi <code>/solve</code> với các ATM bạn chọn.</li>
+              <li>App sẽ tự nhóm các điểm đã chọn theo trường <b>route</b> (Tuyến 1/2/3) và gọi <code>/solve_csv_selected</code> để tối ưu với CSV.</li>
+              <li>Mỗi tuyến dùng depot mặc định: <b>#1</b> cho Tuyến 1, <b>#2</b> cho Tuyến 2, <b>#3</b> cho Tuyến 3 (có thể override trong payload/backend).</li>
+              <li>Không cần chọn depot bằng tay; hệ thống tự thêm depot vào tập con trước khi giải TSP.</li>
             </ul>
           </div>
         </section>

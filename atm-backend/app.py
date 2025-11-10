@@ -5,6 +5,9 @@ from pydantic import BaseModel, Field
 from typing import List, Dict
 import os, requests
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+import pandas as pd
+from pathlib import Path
+
 
 OSRM_URL = os.getenv("OSRM_URL", "http://localhost:5000")  # ví dụ: http://localhost:5000
 
@@ -138,6 +141,161 @@ def solve(req: SolveReq):
 
     order_ids = [ids[i] for i in order_idx]
     return SolveResp(order_ids=order_ids, total_distance_m=int(total), legs_m=legs)
+
+
+def solve_tsp_from_csv(csv_file: str | Path, start_node_id: int, subset_ids: list[int] | None = None):
+    """
+    Đọc ma trận khoảng cách CSV (index là node id), giải TSP vòng kín.
+    Nếu subset_ids được truyền, chỉ lấy ma trận con theo thứ tự subset_ids (phải gồm cả depot).
+    Trả (route_ids(list[str]), total_distance(int meters)).
+    """
+    csv_file = Path(csv_file)
+    if not csv_file.exists():
+        raise HTTPException(status_code=400, detail=f"CSV not found: {csv_file}")
+
+    df = pd.read_csv(csv_file, index_col=0)
+    df.index = df.index.astype(str)
+    # nếu truyền subset -> cắt ma trận theo thứ tự subset
+    if subset_ids is not None:
+        want = [str(x) for x in subset_ids]
+        missing = [x for x in want if x not in df.index]
+        if missing:
+            raise HTTPException(status_code=400, detail=f"IDs not in CSV index: {missing}")
+        df = df.loc[want, want]
+
+    ids = list(df.index)  # string
+    if str(start_node_id) not in ids:
+        raise HTTPException(status_code=400, detail=f"start_id {start_node_id} not in CSV index (after subset)")
+
+    id_to_index = {id_: i for i, id_ in enumerate(ids)}
+    distance_matrix = df.values.tolist()
+
+    manager = pywrapcp.RoutingIndexManager(len(distance_matrix), 1, id_to_index[str(start_node_id)])
+    routing = pywrapcp.RoutingModel(manager)
+
+    def distance_callback(from_index, to_index):
+        f = manager.IndexToNode(from_index)
+        t = manager.IndexToNode(to_index)
+        return int(distance_matrix[f][t])
+
+    cb = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(cb)
+
+    search = pywrapcp.DefaultRoutingSearchParameters()
+    search.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    search.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    search.time_limit.seconds = 10
+
+    sol = routing.SolveWithParameters(search)
+    if not sol:
+        return [], 0
+
+    index = routing.Start(0)
+    route_ids = []
+    total = 0
+    prev = None
+    while not routing.IsEnd(index):
+        node = manager.IndexToNode(index)
+        route_ids.append(ids[node])
+        if prev is not None:
+            total += routing.GetArcCostForVehicle(prev, index, 0)
+        prev = index
+        index = sol.Value(routing.NextVar(index))
+
+    route_ids.append(ids[manager.IndexToNode(index)])  # quay về depot
+    return route_ids, int(total)
+
+
+
+class CSVRouteSpec(BaseModel):
+    name: str
+    file: str
+    start_id: int
+
+class SolveCSVMultiReq(BaseModel):
+    routes: List[CSVRouteSpec] | None = None
+    # Nếu không truyền, sẽ dùng default 3 tuyến như bên dưới.
+
+class SolveCSVMultiResp(BaseModel):
+    results: Dict[str, Dict[str, object]]  # name -> {order_ids, total_distance_m}
+
+
+@app.post("/solve_csv_multi", response_model=SolveCSVMultiResp)
+def solve_csv_multi(req: SolveCSVMultiReq):
+    """
+    Tối ưu 3 tuyến (hoặc nhiều tuyến) độc lập từ các file CSV có sẵn.
+    CSV phải là ma trận khoảng cách, index là node id (string/numeric).
+    """
+    # Base dir: .../AppBIDV  (ngang hàng với atm-backend)
+    # app.py đang ở: .../AppBIDV/atm-backend/app.py
+    BASE = Path(__file__).resolve().parents[1]  # => .../AppBIDV
+
+    default_routes = [
+        CSVRouteSpec(name="Tuyen1", file="Distance_Matrix_Tuyến1.csv", start_id=1),
+        CSVRouteSpec(name="Tuyen2", file="Distance_Matrix_Tuyến2.csv", start_id=2),
+        CSVRouteSpec(name="Tuyen3", file="Distance_Matrix_Tuyến3.csv", start_id=3),
+    ]
+    routes = req.routes if req.routes else default_routes
+
+    results = {}
+    for r in routes:
+        csv_path = BASE / r.file  # CSV đặt trực tiếp trong AppBIDV\
+        order_ids, total = solve_tsp_from_csv(csv_path, r.start_id)
+        results[r.name] = {
+            "order_ids": order_ids,
+            "total_distance_m": total
+        }
+
+    return SolveCSVMultiResp(results=results)
+
+
+from pydantic import BaseModel
+from typing import Dict, List
+
+class SolveCSVSelectedReq(BaseModel):
+    # map tên tuyến -> danh sách atm_id đã chọn (KHÔNG gồm depot)
+    routes: Dict[str, List[int]]  # keys: "Tuyen1"/"Tuyen2"/"Tuyen3"
+    # tuỳ chọn override depot id & file csv:
+    depots: Dict[str, int] | None = None
+    files: Dict[str, str] | None = None
+
+class SolveCSVSelectedResp(BaseModel):
+    results: Dict[str, Dict[str, object]]  # name -> {order_ids, total_distance_m}
+
+@app.post("/solve_csv_selected", response_model=SolveCSVSelectedResp)
+def solve_csv_selected(req: SolveCSVSelectedReq):
+    """
+    Nhận các điểm đã chọn theo từng tuyến, cắt ma trận CSV theo tập con (có thêm depot)
+    rồi giải TSP từng tuyến độc lập.
+    """
+    BASE = Path(__file__).resolve().parents[1]  # .../AppBIDV
+    default_files = {
+        "Tuyen1": "Distance_Matrix_Tuyến1.csv",
+        "Tuyen2": "Distance_Matrix_Tuyến2.csv",
+        "Tuyen3": "Distance_Matrix_Tuyến3.csv",
+    }
+    default_depots = {"Tuyen1": 1, "Tuyen2": 2, "Tuyen3": 3}
+    files = req.files or default_files
+    depots = req.depots or default_depots
+
+    results = {}
+    for name, picked in req.routes.items():
+        if not picked:
+            continue
+        csv_path = BASE / files.get(name, default_files.get(name, ""))
+        depot_id = depots.get(name, default_depots.get(name))
+        subset = [depot_id] + list(dict.fromkeys(picked))  # unique, giữ thứ tự
+        order_ids, total = solve_tsp_from_csv(csv_path, depot_id, subset_ids=subset)
+        # convert string IDs về int nếu được
+        order_int = []
+        for s in order_ids:
+            try: order_int.append(int(s))
+            except: order_int.append(s)  # fallback
+        results[name] = {"order_ids": order_int, "total_distance_m": total}
+
+    return SolveCSVSelectedResp(results=results)
+
+
 
 
 app.mount("/ui", StaticFiles(directory="webui", html=True), name="ui")
